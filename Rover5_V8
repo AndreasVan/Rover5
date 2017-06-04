@@ -1,0 +1,431 @@
+
+// Control of a Rover5 robot with 3 DOF gripper - Last update: AndreasVan 2015-04-02 Version 8.08
+// Dagu Rover 5 2WD Tracked Chassis + Explorer Controller Board for Dagu Rover 5 2WD
+// Remote control through Nrf24L01 2,4GHz wireless module
+// Credits http:/arduino-info.wikispaces.com/Nrf24L01-2.4GHz-HowTo
+// Micro controller = Arduino Mega 2560 - 16x2 LCD display Hitachi HD44780
+// Motor 1 on the left
+// Motor 2 on the right
+// Sent 2 floats (motor current) to transmitter (remote)
+
+// Nrf24L01 pinout
+// 1 GNDRemote_RF24_send
+// 2 VCC (3,3V)
+// 3 CE    pin 48 on Mega 2560
+// 4 CSN   pin 49 on Mega 2560
+// 5 SCK   pin 52 on Mega 2560
+// 6 MOSI  pin 51 on Mega 2560
+// 7 MISO  pin 50 on Mega 2560
+// 8 IRQ (not used)
+
+// LiquidCrystal
+// LCD RS pin to digital pin 25  
+// LCD Enable pin to digital pin 24
+// LCD D4 pin to digital pin 26 
+// LCD D5 pin to digital pin 27 
+// LCD D6 pin to digital pin 28
+// LCD D7 pin to digital pin 29
+// LCD R/W pin to ground
+
+// SR04 Trigger pin 9  
+// SR04 Echo pin 8
+// Servo pin 10
+// IR Reciver pin 13
+
+
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+#include <Ultrasonic.h>
+#include <Servo.h>
+#include <LiquidCrystal.h>  
+#include <Servo.h> 
+#define runEvery(t) for (static typeof(t) _lasttime;(typeof(t))((typeof(t))millis() - _lasttime) > (t);_lasttime += (t))
+
+Servo bottomservo;              // create servo object to control a servo
+Servo shouldservo;              // create servo object to control a servo
+Servo clawservo;                // create servo object to control a servo
+
+LiquidCrystal lcd(23, 22, 24, 25, 26, 27);
+
+RF24 radio(48,49);
+
+const uint64_t pipes[2] = { 
+  0xF0F0F0F0E1LL, 0xF0F0F0F0D2LL };
+
+const int PWN1 = 6;             // pwm motor 1
+const int DIR1 = 7;             // direction motor 1
+const int PWN2 = 11;            // pwm motor 2
+const int DIR2 = 12;            // direction motor 2
+
+uint8_t fs;                     // forward speed
+uint8_t bs;                     // backward speed
+uint8_t ls;                     // turn left speed
+uint8_t rs;                     // turn right speed
+
+int bat;                        // analog reading of battery voltage through voltage divider
+const int lowbat = 34;          // low battery blinking led (red)
+const int buzzer = 29;          // buzzer
+const int blinkLed = 31;        // gripper mode
+const int headlight = 35;       // white leds
+const int headlight2 = 37;      // white leds
+const int blinkBlue = 33;       // drive mode
+const int redLed = 34;          // robot drives forward
+const int greenLed = 30;        // robot drives backward
+const int yellowLed = 28;       // robot turns left
+const int blueLed = 32;         // robot turns right
+
+Servo myservo;  
+int pos = 90;                   // start position of servo = 90
+int servoDirection = 0;         // sweeping left or right
+int servoDelay = 55;            // servo sweep speed
+
+const int  TRIG = 9;            // trigger SR04
+const int  ECHO = 8;            // echo SR04
+
+uint8_t XNewPos =  78;          // startup sero position - rotate 
+uint8_t YNewPos =  165;         // startup sero position - upp/down
+uint8_t ZNewPos =  60;          // startup sero position - gripper
+
+int Xcounter = 0;
+int Ycounter = 0;
+int Zcounter = 0;
+
+int XOldPos;
+int YOldPos;
+int ZOldPos;
+
+long previousMillis1 = 0;
+long previousMillis2 = 0;
+long previousMillis3 = 0;
+
+const int intervalg = 50;
+
+Ultrasonic SR04(TRIG, ECHO);
+
+int joystick[7];                // Array with analog values (X & Y-axis) and digital values (button) from remote control
+float rover[5];                 // Array with the motor rover values, to sent to remote control
+
+int apin[] = { 
+  A1, A2, A3, A4 };             // analog pin array
+
+long previousMillis = 0;
+
+const int interval = 100;
+
+void setup() {
+  pinMode(DIR1, OUTPUT);        // direction motor 1, left
+  pinMode(DIR2, OUTPUT);        // direction motor 2, right
+  pinMode(PWN1, OUTPUT);        // PWM motor 1
+  pinMode(PWN2, OUTPUT);        // PWM motor 2
+  pinMode(lowbat, OUTPUT);      // low battery led (red)
+  pinMode(buzzer, OUTPUT);      // buzzer
+  pinMode(blinkLed, OUTPUT);    // blinking led
+  pinMode(headlight, OUTPUT);   // white leds
+  pinMode(headlight2, OUTPUT);  // white leds
+  pinMode(blinkBlue, OUTPUT);   // Blinking Blue LED
+  pinMode(redLed, OUTPUT);      // Red forward
+  pinMode(greenLed, OUTPUT);    // Green backward
+  pinMode(yellowLed, OUTPUT);   // Yellow turn left
+  pinMode(blueLed, OUTPUT);     // Blue turn right 
+
+  
+  lcd.begin(16, 2);
+  lcd.clear();
+  lcd.print(" Rover5 Gripper ");
+  lcd.setCursor(0, 1);
+  lcd.print("> Version 8.07 < ");
+
+  radio.begin();
+  radio.openWritingPipe(pipes[1]);
+  radio.openReadingPipe(1,pipes[0]);
+  radio.startListening();
+  
+  bottomservo.attach(43);      // attaches the servo on pin 9 to the servo object 
+  shouldservo.attach(41);      // attaches the servo on pin 10 to the servo object
+  clawservo.attach(45);        // attaches the servo on pin 11 to the servo object
+  
+  myservo.attach(10);          // SR04 servo on pin 10
+  myservo.write(pos);          // SR04 center servo
+}
+
+void loop() {
+  
+   sweepServo();                           // servo sweep function 
+   
+   rover[4] = analogRead(A7) /23;
+
+  if ( radio.available() )
+  {
+                                           // dump the payloads until we've gotten everything
+
+    bool done = false;
+    while (!done)
+    {
+      // Fetch the payload, and see if this was the last one.
+      done = radio.read( &joystick, sizeof(joystick) );
+    }
+    if (rover[4] < 7.4)
+    {
+      if(joystick[5] == HIGH)              // activate gripper
+      {
+
+     digitalWrite(headlight, HIGH);        // turn on headlights
+     digitalWrite(headlight2, HIGH);       // turn on headlights
+
+     
+        if(SR04.Ranging(CM) < 30){
+          digitalWrite(buzzer, HIGH);      // warning we're going to crash 
+        }
+        else {
+         digitalWrite(buzzer, LOW); 
+       } 
+      if (joystick[0] > 500 && joystick[0] < 540 && joystick[1] > 490 && joystick[1] < 530 )    // joystick is centered
+      {
+        stopped();
+      }
+
+      if (joystick[0] <= 500 && joystick[1] > 490 && joystick[1] < 530)                        // joystick forward = motor forward
+      {
+        fs = (map(joystick[0], 500, 0, 35, 255));
+        forward(fs);
+      }
+
+      if (joystick[0] >= 540 && joystick[1] > 490 && joystick[1] < 530)                        // joystick backward = motor backward
+      {
+        bs = (map(joystick[0], 540, 1023, 35, 255));
+        backward(bs);
+      }
+
+      if (joystick[1] <= 490 && joystick[0] > 500 && joystick[0] < 540)                        // joystick left = left motor backward && right motor forward
+      {
+        ls = (map(joystick[1], 490, 0, 35, 255));
+        turnleft(ls);
+      }
+
+      if (joystick[1] >= 530 && joystick[0] > 500 && joystick[0] < 540)                        // joystick right = left motor forward && right motor backward
+      {
+        rs = (map(joystick[1], 530, 1023, 35, 255));
+        turnright(rs);
+        }
+      }
+      else {
+        stopped();
+        digitalWrite(headlight, LOW);   // turn off headlights
+        digitalWrite(headlight2, LOW);  // turn off headlights
+        digitalWrite(blinkLed, HIGH);   // turn on red blink led
+        digitalWrite(blinkBlue, LOW);   // turn off blue blink led
+        lcd.clear();
+        lcd.print("     Rover5     ");
+        lcd.setCursor(0, 1);
+        lcd.print("> Gripper mode <");
+        
+
+        if ( joystick[3] == LOW && ZNewPos < 169) //gripper 
+        {
+          Zcounter+=2;
+          ZNewPos = ZNewPos + Zcounter;
+        }
+
+        if ( joystick[4] == LOW && ZNewPos > 32)  //gripper 
+        {
+          Zcounter+=2;
+          ZNewPos = ZNewPos - Zcounter;
+        }
+
+        if (joystick[1] > 600 && XNewPos < 170)  // rotate 
+        {
+          Xcounter+=3;
+          XNewPos = XNewPos + (Xcounter);
+        }
+
+        if (joystick[1] < 400 && XNewPos > 5)   // rotate 
+        {
+          Xcounter+=3;
+          XNewPos = XNewPos - (Xcounter);
+        }
+
+        if (joystick[0] < 400 && YNewPos < 169)  // upp down
+        {
+          Ycounter+=3;
+          YNewPos = YNewPos + (Ycounter);
+        }
+
+        if (joystick[0] > 600 && YNewPos > 30)   // upp down
+        {
+          Ycounter+=3;
+          YNewPos = YNewPos - (Ycounter);
+        }
+
+        unsigned long currentMillis1 = millis();
+
+        if(XOldPos != XNewPos && currentMillis1 - previousMillis1 > intervalg) {   // rotate 	 
+          previousMillis1 = currentMillis1;
+          Xcounter = 5;   // movement fast/slow
+          XOldPos = XNewPos;
+          if(XNewPos < 5)
+          {
+            XNewPos = 5;
+          }
+          if(XNewPos > 170)
+          {
+            XNewPos = 170;
+          }
+          bottomservo.write(XNewPos);     // tell servo to go to position in variable 'XNewPos'
+        } 
+
+        unsigned long currentMillis2 = millis();
+
+        if(YOldPos != YNewPos && currentMillis2 - previousMillis2 > intervalg) { //  upp and down 
+          previousMillis2 = currentMillis2;
+          Ycounter = 02;    // movement fast/slow
+          YOldPos = YNewPos;
+          if(YNewPos < 50)
+          {
+            YNewPos = 50;
+          }
+          if(YNewPos > 174)
+          {
+            YNewPos = 174;
+          }
+          shouldservo.write(YNewPos);     // tell servo to go to position in variable 'YNewPos' 
+        }
+
+        unsigned long currentMillis3 = millis();
+
+        if(ZOldPos != ZNewPos && currentMillis3 - previousMillis3 > intervalg) {  //  gripper - Issue command only if desired position changes
+          previousMillis3 = currentMillis3;
+          Zcounter = 3;    // movement fast/slow
+          ZOldPos = ZNewPos;
+
+         
+          if(ZNewPos < 32)               // set servo in degrees from approximately 0 to 180
+          {
+            ZNewPos = 32;
+          }
+          if(ZNewPos > 169)
+          {
+            ZNewPos = 169;
+          }
+          clawservo.write(ZNewPos);     // tell servo to go to position in variable 'ZNewPos' 
+        }
+      }
+    }
+  }
+
+  unsigned long roverMillis = millis();
+  if(roverMillis - previousMillis > interval) {
+    previousMillis = roverMillis;   
+
+    radio.stopListening();
+    bool ok = radio.write( &rover, sizeof(rover) );
+    radio.startListening();
+  }
+  // 4 analog readings from motor controller = motor rover
+  for (int i=0; i<4; i++)
+  {
+    rover[i] = analogRead( apin[i] )/ 1023.0 * 5.0;
+  }
+}
+
+void stopped()
+{
+  analogWrite(PWN1, 0);
+  analogWrite(PWN2, 0);
+  digitalWrite(redLed, LOW);
+  digitalWrite(greenLed, LOW);
+  digitalWrite(yellowLed, LOW);
+  digitalWrite(blueLed, LOW);  
+  digitalWrite(blinkLed, LOW);
+  digitalWrite(blinkBlue, LOW);
+  lcd.clear();
+  lcd.print("     Rover5     ");
+  lcd.setCursor(0, 1);
+  lcd.print("> Remote mode! <");
+}
+
+void forward(int fs)
+{
+  digitalWrite(DIR1, HIGH);
+  digitalWrite(DIR2, HIGH);
+  analogWrite(PWN1, fs);
+  analogWrite(PWN2, fs);
+  digitalWrite(redLed, LOW);
+  digitalWrite(greenLed, HIGH);
+  digitalWrite(yellowLed, LOW);
+  digitalWrite(blueLed, LOW);
+  digitalWrite(blinkLed, LOW);
+  digitalWrite(blinkBlue, HIGH);
+}
+
+void backward(int bs)
+{
+  digitalWrite(DIR1, LOW);
+  digitalWrite(DIR2, LOW);
+  analogWrite(PWN1, bs);
+  analogWrite(PWN2, bs);
+  digitalWrite (redLed, HIGH);
+  digitalWrite (greenLed, LOW);
+  digitalWrite (yellowLed, LOW);
+  digitalWrite (blueLed, LOW);
+  digitalWrite(blinkLed, LOW);
+  digitalWrite(blinkBlue, HIGH);
+}
+
+void turnleft(int ls)
+{
+  digitalWrite(DIR1, LOW);
+  digitalWrite(DIR2, HIGH);
+  analogWrite(PWN1, ls);
+  analogWrite(PWN2, ls);
+  digitalWrite(redLed, LOW);
+  digitalWrite(greenLed, LOW);
+  digitalWrite(yellowLed, HIGH);
+  digitalWrite(blueLed, LOW);
+  digitalWrite(blinkLed, LOW);  
+  digitalWrite(blinkBlue, HIGH);
+}
+
+void turnright(int rs)
+{
+  digitalWrite(DIR1, HIGH);
+  digitalWrite(DIR2, LOW);
+  analogWrite(PWN1, rs);
+  analogWrite(PWN2, rs);
+  digitalWrite(redLed, LOW);
+  digitalWrite(greenLed, LOW);
+  digitalWrite(yellowLed, LOW);
+  digitalWrite(blueLed, HIGH);
+  digitalWrite(blinkLed, LOW);  
+  digitalWrite(blinkBlue, HIGH);
+}
+
+void getDistance()
+{
+  runEvery(20)                                //loop for ultrasonic measurement
+  {
+    }
+    Serial.print("Ping: ");                   //to check distance on the serial monitor
+
+    Serial.println("cm");  
+}
+
+void sweepServo()
+{
+  runEvery(servoDelay) {                      // this loop determines the servo position
+ 
+    if(pos < 165 && servoDirection == 0) {    // 165 = servo to the left
+        pos = pos + 3;                       
+    } 
+    if(pos > 15 && servoDirection == 1) {     // 15 = servo to the right
+        pos = pos - 5;
+    }    
+  }   
+    if (pos == 165 ) {   
+        servoDirection = 1;                    //changes the direction
+  }
+    if (pos == 15 ) {    
+        servoDirection = 0;                    //changes the direction
+  }   
+    myservo.write(pos);                        //move that servo!
+}
